@@ -43,3 +43,6 @@ _novel_crypto.py
 
 # 설계/스펙 문서는 비공개 — public repo 에 안 올림
 docs/
+
+# 빌드 도구 — dev 전용
+tools/

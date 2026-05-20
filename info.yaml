@@ -1,0 +1,6 @@
+title: "toki_dl"
+version: "0.2.1"
+package_name: "toki_dl"
+developer: "basilro"
+description: "뉴토끼(newtoki) 만화/웹툰/소설 무료 회차 자동 다운로드"
+home: "https://github.com/basilro/toki_dl"

@@ -1,12 +1,17 @@
-"""평문 .py → flaskfarm .pyf (암호화) 변환.
+"""평문 .py → flaskfarm .pyf (Python 코드 암호화) 변환.
 
 사용:
     # SJVA Linux 컨테이너 안에서 실행 (Python 3.10 또는 3.11)
     cd /volume1/docker/ff/plugins/toki_dl
     python3 tools/encrypt_pyf.py _novel_crypto.py
+    # → _novel_crypto.pyf (같은 디렉토리)
 
-flaskfarm 의 native `sc` 모듈을 사용. 결과:
-    _novel_crypto.py   →  _novel_crypto.pyf  (같은 디렉토리)
+내부적으로 flaskfarm 의 native `sc` 모듈의 `encode(text, mode=1)` 호출.
+mode=1 은 `cli/code_encode.py` 가 사용하는 Python 코드 전용 암호화 모드.
+mode=0 은 일반 텍스트용이며 의도된 보호 효과가 다름.
+
+검증: 출력 첫 200자에 `import`/`def`/`class` 같은 키워드가 보이면
+sc.encode 가 passthrough 한 것 → mode 가 잘못된 것으로 판단하여 에러.
 
 평문 .py 는 손대지 않음. .pyf 만 commit, .py 는 .gitignore 로 비공개.
 """
@@ -39,7 +44,12 @@ def _find_libsc() -> str:
         'FLASKFARM_LIBSC=/path/to/flaskfarm/lib/support/libsc 로 지정')
 
 
-def encode_file(src_path: str) -> str:
+def encode_file(src_path: str, mode: int = 1) -> str:
+    """`.py` → `.pyf` (sc.encode mode=1 = Python 코드 암호화).
+
+    flaskfarm 의 `cli/code_encode.py` 가 사용하는 표준 모드.
+    mode=0 은 일반 텍스트용 (의도된 효과 다름).
+    """
     if not os.path.isfile(src_path):
         raise FileNotFoundError(src_path)
     libsc = _find_libsc()
@@ -47,14 +57,20 @@ def encode_file(src_path: str) -> str:
     import sc  # noqa
     with open(src_path, 'r', encoding='utf-8') as fp:
         src = fp.read()
-    encoded = sc.encode(src, 0)
+    encoded = sc.encode(src, mode)
     if not encoded:
         raise RuntimeError('sc.encode() returned empty')
-    dst_path = src_path[:-3] + '.pyf' if src_path.endswith('.py') \
+    out = encoded if isinstance(encoded, str) else encoded.decode('utf-8')
+    # 검증: 평문 그대로면 mode 가 잘못된 것 (passthrough)
+    head = out[:200]
+    if 'import' in head or 'def ' in head or 'class ' in head:
+        raise RuntimeError(
+            f'sc.encode(mode={mode}) 가 평문 반환 — mode 가 잘못된 듯. '
+            f'output head: {head[:100]!r}')
+    dst_path = src_path + 'f' if src_path.endswith('.py') \
         else src_path + '.pyf'
     with open(dst_path, 'w', encoding='utf-8') as fp:
-        fp.write(encoded if isinstance(encoded, str)
-                 else encoded.decode('utf-8'))
+        fp.write(out)
     return dst_path
 
 

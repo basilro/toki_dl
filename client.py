@@ -17,6 +17,17 @@ from urllib.parse import urlparse
 
 import requests
 
+# ── HTTP 백엔드 ──
+# Cloudflare TLS 핑거프린트 우회를 위해 curl_cffi (Chrome 임퍼소네이트) 우선 사용.
+# 미설치 환경에서는 stdlib requests 로 폴백 — Cloudflare 가 403 줄 가능성 큼.
+try:
+    from curl_cffi import requests as _cffi_req
+    _HTTP_BACKEND = 'curl_cffi'
+except Exception:
+    _cffi_req = None
+    _HTTP_BACKEND = 'requests'
+
+
 # ── novel DRM 모듈 (private) ──
 # 개발: 같은 디렉토리의 평문 `_novel_crypto.py` 직접 import.
 # 운영(public 배포): `_novel_crypto.py` 가 없고 `_novel_crypto.pyf` (암호화) 만 존재 →
@@ -87,14 +98,22 @@ class NewtokiClient:
             print(f'[{level.upper()}] ' + (msg % args if args else msg))
 
     # ---- 세션 / 헤더 ----
-    def _build_session(self) -> requests.Session:
-        s = requests.Session()
-        s.headers.update({
-            'User-Agent': DEFAULT_UA,
-            'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-            # br 빼야 함 — brotli 미설치 환경 대응
-            'Accept-Encoding': 'gzip, deflate',
-        })
+    def _build_session(self):
+        if _HTTP_BACKEND == 'curl_cffi':
+            # Chrome TLS/HTTP2 핑거프린트 임퍼소네이트 — Cloudflare 우회
+            s = _cffi_req.Session(impersonate='chrome')
+            # impersonate 가 UA / sec-ch-ua / Accept-Encoding 자동 세팅
+            s.headers.update({
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+            })
+        else:
+            s = requests.Session()
+            s.headers.update({
+                'User-Agent': DEFAULT_UA,
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                # br 빼야 함 — brotli 미설치 환경 대응
+                'Accept-Encoding': 'gzip, deflate',
+            })
         host = urlparse(self.base_url).netloc
         # 핑거프린트 쿠키 — 서버가 이게 없으면 /api/novel-content 등에서 "blocked"
         for name, val in (('ntk_pid', self._ntk_pid), ('ntk_fp', self._ntk_fp)):
@@ -135,16 +154,20 @@ class NewtokiClient:
         h = {
             'Accept': ('text/html,application/xhtml+xml,application/xml;'
                        'q=0.9,image/avif,image/webp,*/*;q=0.8'),
-            'sec-ch-ua': ('"Chromium";v="148", "Google Chrome";v="148", '
-                          '"Not/A)Brand";v="99"'),
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'document',
-            'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin' if referer else 'none',
-            'sec-fetch-user': '?1',
             'upgrade-insecure-requests': '1',
         }
+        if _HTTP_BACKEND != 'curl_cffi':
+            # stdlib requests 모드: sec-* 헤더 수동 세팅
+            h.update({
+                'sec-ch-ua': ('"Chromium";v="148", "Google Chrome";v="148", '
+                              '"Not/A)Brand";v="99"'),
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'same-origin' if referer else 'none',
+                'sec-fetch-user': '?1',
+            })
         if referer:
             h['Referer'] = referer
         return h
@@ -155,14 +178,17 @@ class NewtokiClient:
             'Accept': '*/*',
             'Origin': self.base_url,
             'Referer': referer,
-            'sec-ch-ua': ('"Chromium";v="148", "Google Chrome";v="148", '
-                          '"Not/A)Brand";v="99"'),
-            'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"',
-            'sec-fetch-dest': 'empty',
-            'sec-fetch-mode': 'cors',
-            'sec-fetch-site': 'same-origin',
         }
+        if _HTTP_BACKEND != 'curl_cffi':
+            h.update({
+                'sec-ch-ua': ('"Chromium";v="148", "Google Chrome";v="148", '
+                              '"Not/A)Brand";v="99"'),
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'empty',
+                'sec-fetch-mode': 'cors',
+                'sec-fetch-site': 'same-origin',
+            })
         if extra:
             h.update(extra)
         return h
@@ -540,17 +566,21 @@ class NewtokiClient:
     def download_image(self, url: str, referer: str,
                        max_retries: int = 2) -> bytes:
         """이미지 1장 다운로드 (요청별 Referer 필수)."""
+        img_headers = {
+            'Accept': ('image/avif,image/webp,image/apng,'
+                       'image/svg+xml,image/*,*/*;q=0.8'),
+            'Referer': referer,
+        }
+        if _HTTP_BACKEND != 'curl_cffi':
+            img_headers.update({
+                'sec-fetch-dest': 'image',
+                'sec-fetch-mode': 'no-cors',
+                'sec-fetch-site': 'cross-site',
+            })
         last_err = None
         for attempt in range(max_retries + 1):
             try:
-                r = self._sess.get(url, timeout=30, headers={
-                    'Accept': ('image/avif,image/webp,image/apng,'
-                               'image/svg+xml,image/*,*/*;q=0.8'),
-                    'Referer': referer,
-                    'sec-fetch-dest': 'image',
-                    'sec-fetch-mode': 'no-cors',
-                    'sec-fetch-site': 'cross-site',
-                })
+                r = self._sess.get(url, timeout=30, headers=img_headers)
                 if r.status_code == 200:
                     return r.content
                 last_err = NewtokiError(

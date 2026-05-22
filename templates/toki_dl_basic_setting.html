@@ -123,6 +123,17 @@
                   '※ 쿠키 만료 시 알림 탭의 알림 URL 로 통지됨.']) }}
 
         <hr style="margin:18px 0;"/>
+        <h5 style="margin-bottom:8px;">FlareSolverr (선택)</h5>
+
+        {{ macros.setting_input_text('flaresolverr_url', 'FlareSolverr URL',
+            value=arg['flaresolverr_url'],
+            desc=['Cloudflare JS 챌린지 우회용 — 헤드리스 Chrome 으로 챌린지 실제 풀이.',
+                  '예) http://flaresolverr:8191 (같은 docker network) 또는 http://192.168.1.10:8191',
+                  '도커 설치: docker run -d --name flaresolverr --restart unless-stopped -p 8191:8191 ghcr.io/flaresolverr/flaresolverr:latest',
+                  '비워두면 직접 호출 (curl_cffi). 403 + "Just a moment..." 발생 시 설정 권장.',
+                  '※ 회차당 5~15초 지연 추가됨. 이미지 다운은 우회 안 거침 (CDN 직접).']) }}
+
+        <hr style="margin:18px 0;"/>
         <h5 style="margin-bottom:8px;">프록시 (선택)</h5>
 
         {{ macros.setting_checkbox('use_proxy', '프록시 사용',

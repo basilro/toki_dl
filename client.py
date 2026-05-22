@@ -73,22 +73,196 @@ class BlockedError(NewtokiError):
 # ───────────────────────────── client ──────────────────────────────
 
 
+# ───────────────────────── FlareSolverr proxy ─────────────────────────
+
+class _FSResponse:
+    """FlareSolverr 응답을 requests.Response 와 비슷한 인터페이스로 wrap."""
+
+    def __init__(self, sol: dict):
+        self.status_code = int(sol.get('status') or 0)
+        text = sol.get('response') or ''
+        self.text = text
+        try:
+            self.content = text.encode('utf-8')
+        except Exception:
+            self.content = b''
+        self.url = sol.get('url') or ''
+        # headers: list of {name, value} → 대소문자 무시 dict
+        self._headers_list = sol.get('headers') or []
+        # cookies: list of {name, value, domain, path, ...}
+        self._cookies_list = sol.get('cookies') or []
+
+    @property
+    def headers(self):
+        return _FSHeaderView(self._headers_list)
+
+    def json(self):
+        text = self.text
+        # Chrome 이 application/json 응답을 <pre>JSON</pre> 형태로 감싸는 경우 unwrap
+        m = re.search(r'<pre[^>]*>(.*?)</pre>', text, re.DOTALL)
+        if m:
+            text = m.group(1)
+            text = (text.replace('&quot;', '"').replace('&amp;', '&')
+                        .replace('&lt;', '<').replace('&gt;', '>'))
+        return json.loads(text)
+
+
+class _FSHeaderView:
+    """대소문자 무시 header 조회 — Set-Cookie 등 중복 키는 ', ' 로 합침."""
+
+    def __init__(self, items):
+        self._items = items  # list of {name, value}
+
+    def get(self, name, default=None):
+        ln = name.lower()
+        matches = [it.get('value', '') for it in self._items
+                   if (it.get('name') or '').lower() == ln]
+        if not matches:
+            return default
+        return ', '.join(matches)
+
+
+class _FSCookieJar:
+    """최소 호환 cookie jar — FS 모드에선 실제 cookie 는 FS 가 관리."""
+
+    def __init__(self):
+        self._d = {}
+
+    def set(self, name, value, **kw):
+        self._d[name] = value
+
+    def get(self, name, default=None):
+        return self._d.get(name, default)
+
+
+class FlareSolverrSession:
+    """requests.Session 호환 — 모든 요청을 FlareSolverr 로 proxy.
+
+    이미지 같은 binary 응답은 처리하지 못함 (호출자가 직접 다른 세션 사용).
+    HTML/JSON API 응답만 안정적.
+    """
+
+    def __init__(self, fs_url: str, base_url: str,
+                 init_cookies: Optional[List[Dict[str, str]]] = None,
+                 proxy_url: Optional[str] = None,
+                 logger=None):
+        self.fs_url = fs_url.rstrip('/') + '/v1'
+        self.base_url = base_url
+        self.logger = logger
+        self.headers = {}                # mock — FS 는 헤더 일부만 인식
+        self.cookies = _FSCookieJar()    # mock
+        self.proxies = {}                # mock
+        self._session_id: Optional[str] = None
+        # 첫 요청에 함께 보낼 초기 쿠키 (ntk_pid/ntk_fp 등)
+        self._pending_cookies = list(init_cookies or [])
+        # sessions.create
+        body: Dict[str, Any] = {'cmd': 'sessions.create'}
+        if proxy_url:
+            body['proxy'] = {'url': proxy_url}
+        try:
+            r = requests.post(self.fs_url, json=body, timeout=120)
+        except Exception as e:
+            raise NewtokiError(f'FlareSolverr 접속 실패: {e}')
+        try:
+            data = r.json()
+        except Exception:
+            raise NewtokiError(
+                f'FlareSolverr non-JSON: HTTP {r.status_code} {r.text[:120]}')
+        if data.get('status') != 'ok':
+            raise NewtokiError(
+                f'FlareSolverr sessions.create: {data.get("message")}')
+        self._session_id = data.get('session')
+        if logger:
+            logger.info('[FS] session created: %s', self._session_id)
+
+    def close(self):
+        if not self._session_id:
+            return
+        try:
+            requests.post(self.fs_url, json={
+                'cmd': 'sessions.destroy', 'session': self._session_id,
+            }, timeout=15)
+        except Exception:
+            pass
+        self._session_id = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def get(self, url, headers=None, timeout=30, **kw):
+        return self._req('request.get', url, headers, timeout)
+
+    def post(self, url, data=None, headers=None, timeout=30, **kw):
+        return self._req('request.post', url, headers, timeout, data)
+
+    def _req(self, cmd: str, url: str,
+             headers: Optional[Dict[str, str]],
+             timeout: Optional[int],
+             post_data=None) -> _FSResponse:
+        t = int(timeout or 30)
+        body: Dict[str, Any] = {
+            'cmd': cmd, 'url': url, 'session': self._session_id,
+            'maxTimeout': max(t * 1000, 60000),
+        }
+        if self._pending_cookies:
+            body['cookies'] = self._pending_cookies
+            self._pending_cookies = []   # 한 번만
+        if post_data is not None:
+            if isinstance(post_data, (dict, list)):
+                from urllib.parse import urlencode
+                post_data = urlencode(post_data)
+            elif not isinstance(post_data, str):
+                post_data = str(post_data)
+            body['postData'] = post_data
+        if headers:
+            # FlareSolverr 일부 버전만 headers 인식
+            body['headers'] = headers
+        try:
+            r = requests.post(self.fs_url, json=body, timeout=t + 90)
+        except Exception as e:
+            raise NewtokiError(f'FlareSolverr 요청 실패: {e}')
+        try:
+            data = r.json()
+        except Exception:
+            raise NewtokiError(
+                f'FlareSolverr non-JSON 응답: HTTP {r.status_code}')
+        if data.get('status') != 'ok':
+            msg = data.get('message') or ''
+            if 'challenge' in msg.lower() or 'cloudflare' in msg.lower():
+                raise BlockedError(f'FlareSolverr challenge 실패: {msg}')
+            raise NewtokiError(f'FlareSolverr: {msg}')
+        return _FSResponse(data.get('solution') or {})
+
+
+# ───────────────────────────── client ──────────────────────────────
+
+
 class NewtokiClient:
 
     def __init__(self, base_url: Optional[str] = None,
                  logger=None, proxy_url: Optional[str] = None,
-                 cookies: Optional[str] = None):
+                 cookies: Optional[str] = None,
+                 flaresolverr_url: Optional[str] = None):
         self.base_url = (base_url or DEFAULT_BASE).rstrip('/')
         self.logger = logger
         self._proxy_url = (proxy_url or '').strip() or None
         self._user_cookies = (cookies or '').strip() or None
+        self._fs_url = (flaresolverr_url or '').strip() or None
         # 세션 단위로 고정해두는 핑거프린트 (브라우저 client-side 쿠키 모방)
         self._ntk_pid = secrets.token_hex(16)
         self._ntk_fp = secrets.token_hex(16)
         # nv 쿠키는 소설 다운로드 시 최초 1회 발급 후 세션 재사용
         self._nv: Optional[str] = None
-        # 모든 호출 공유하는 세션
-        self._sess = self._build_session()
+        # 이미지 CDN(i.toonflix.app) — Cloudflare 보호 없음, 항상 직접 호출
+        self._img_sess = self._build_direct_session()
+        # 메인 도메인 — FS 설정 시 proxy, 아니면 직접
+        if self._fs_url:
+            self._sess = self._build_fs_session()
+        else:
+            self._sess = self._img_sess
 
     # ---- 로깅 ----
     def _log(self, level: str, msg: str, *args):
@@ -98,11 +272,12 @@ class NewtokiClient:
             print(f'[{level.upper()}] ' + (msg % args if args else msg))
 
     # ---- 세션 / 헤더 ----
-    def _build_session(self):
+    def _build_direct_session(self):
+        """직접 호출 세션 — curl_cffi (Chrome TLS) 우선, fallback requests.
+        이미지 CDN(i.toonflix.app) 용으로 항상 만들어두고, FS 미사용 시 메인도 공유.
+        """
         if _HTTP_BACKEND == 'curl_cffi':
-            # Chrome TLS/HTTP2 핑거프린트 임퍼소네이트 — Cloudflare 우회
             s = _cffi_req.Session(impersonate='chrome')
-            # impersonate 가 UA / sec-ch-ua / Accept-Encoding 자동 세팅
             s.headers.update({
                 'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
             })
@@ -111,17 +286,14 @@ class NewtokiClient:
             s.headers.update({
                 'User-Agent': DEFAULT_UA,
                 'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
-                # br 빼야 함 — brotli 미설치 환경 대응
                 'Accept-Encoding': 'gzip, deflate',
             })
         host = urlparse(self.base_url).netloc
-        # 핑거프린트 쿠키 — 서버가 이게 없으면 /api/novel-content 등에서 "blocked"
         for name, val in (('ntk_pid', self._ntk_pid), ('ntk_fp', self._ntk_fp)):
             try:
                 s.cookies.set(name, val, domain=host, path='/')
             except Exception:
                 pass
-        # 사용자 입력 쿠키 — `k1=v1; k2=v2` 또는 줄바꿈 구분
         if self._user_cookies:
             for name, val in self._parse_cookie_string(self._user_cookies):
                 try:
@@ -131,6 +303,20 @@ class NewtokiClient:
         if self._proxy_url:
             s.proxies = {'http': self._proxy_url, 'https': self._proxy_url}
         return s
+
+    def _build_fs_session(self):
+        """FlareSolverr proxy 세션 — Cloudflare 챌린지 우회용."""
+        init_cookies: List[Dict[str, str]] = [
+            {'name': 'ntk_pid', 'value': self._ntk_pid},
+            {'name': 'ntk_fp',  'value': self._ntk_fp},
+        ]
+        if self._user_cookies:
+            for n, v in self._parse_cookie_string(self._user_cookies):
+                init_cookies.append({'name': n, 'value': v})
+        return FlareSolverrSession(
+            fs_url=self._fs_url, base_url=self.base_url,
+            init_cookies=init_cookies, proxy_url=self._proxy_url,
+            logger=self.logger)
 
     @staticmethod
     def _parse_cookie_string(raw: str) -> List[Tuple[str, str]]:
@@ -544,7 +730,8 @@ class NewtokiClient:
             raise NewtokiError(
                 '소설 다운로드 모듈(_novel_crypto) 미설치 — '
                 '이 빌드는 만화/웹툰만 지원합니다.')
-        ua = self._sess.headers.get('User-Agent', DEFAULT_UA)
+        # UA: FS 모드면 헤더 dict 가 비어있을 수 있어 DEFAULT_UA 폴백
+        ua = (self._sess.headers.get('User-Agent') if hasattr(self._sess, 'headers') else None) or DEFAULT_UA
         nv_holder = {'nv': self._nv}
         try:
             result = _NOVEL_CRYPTO.fetch_novel_episode(
@@ -577,10 +764,12 @@ class NewtokiClient:
                 'sec-fetch-mode': 'no-cors',
                 'sec-fetch-site': 'cross-site',
             })
+        # 이미지는 항상 _img_sess (curl_cffi 직접) — FS 는 binary 처리 불가
+        sess = self._img_sess
         last_err = None
         for attempt in range(max_retries + 1):
             try:
-                r = self._sess.get(url, timeout=30, headers=img_headers)
+                r = sess.get(url, timeout=30, headers=img_headers)
                 if r.status_code == 200:
                     return r.content
                 last_err = NewtokiError(
@@ -714,6 +903,7 @@ class NewtokiClient:
     def resolve_base_url(cls, current_base_url: str,
                          proxy_url: Optional[str] = None,
                          cookies: Optional[str] = None,
+                         flaresolverr_url: Optional[str] = None,
                          max_try: int = 3,
                          logger=None) -> Optional[str]:
         """호스트 끝 숫자를 +1 ~ +max_try 까지 증가시키며 최초로 살아있는 도메인 반환.
@@ -734,7 +924,8 @@ class NewtokiClient:
         for url in cands:
             try:
                 cli = cls(base_url=url, logger=logger,
-                          proxy_url=proxy_url, cookies=cookies)
+                          proxy_url=proxy_url, cookies=cookies,
+                          flaresolverr_url=flaresolverr_url)
                 h = cli.check_health()
                 if not h['domain_ok']:
                     if logger:

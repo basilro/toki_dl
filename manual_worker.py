@@ -82,8 +82,10 @@ def _build_client() -> NewtokiClient:
         P.ModelSetting.get('use_proxy'),
         P.ModelSetting.get('proxy_url'))
     cookies = (P.ModelSetting.get('cookies') or '').strip() or None
+    fs_url = (P.ModelSetting.get('flaresolverr_url') or '').strip() or None
     return NewtokiClient(base_url=base, logger=P.logger,
-                         proxy_url=proxy_url, cookies=cookies)
+                         proxy_url=proxy_url, cookies=cookies,
+                         flaresolverr_url=fs_url)
 
 
 def analyze(url_or_id: str, default_kind: str = 'manhwa') -> Dict[str, Any]:

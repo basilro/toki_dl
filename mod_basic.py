@@ -33,10 +33,11 @@ class ModuleBasic(PluginModuleBase):
             'max_per_run': '5',           # 작품당 1회 실행 최대 다운 회차
             'use_compress': 'False',      # 회차 폴더 ZIP 압축 (만화/웹툰만)
 
-            # 인증 (쿠키 + 프록시 + 도메인 자동 갱신)
+            # 인증 (쿠키 + 프록시 + FlareSolverr + 도메인 자동 갱신)
             'cookies': '',                # 브라우저에서 복사한 쿠키 (k=v; k=v 형식)
             'use_proxy': 'False',
             'proxy_url': '',
+            'flaresolverr_url': '',       # Cloudflare 우회용 — 예: http://flaresolverr:8191
             'auto_resolve_base_url': 'True',     # 스케줄 시작 시 도메인 죽었으면 자동 갱신
             'announcer_url': 'https://xn--h10b90bi5zuhh79k.net',  # 뉴토끼주소.net
 
@@ -77,10 +78,12 @@ class ModuleBasic(PluginModuleBase):
                     P.ModelSetting.get('use_proxy'),
                     P.ModelSetting.get('proxy_url'))
                 cookies = (P.ModelSetting.get('cookies') or '').strip() or None
+                fs_url = (P.ModelSetting.get('flaresolverr_url') or '').strip() or None
                 cur = (P.ModelSetting.get('base_url') or '').strip()
                 new_url = NewtokiClient.resolve_base_url(
                     current_base_url=cur, proxy_url=proxy_url,
-                    cookies=cookies, logger=P.logger)
+                    cookies=cookies, flaresolverr_url=fs_url,
+                    logger=P.logger)
                 if new_url:
                     if cur != new_url:
                         P.ModelSetting.set('base_url', new_url)
@@ -103,9 +106,11 @@ class ModuleBasic(PluginModuleBase):
                     P.ModelSetting.get('proxy_url'))
                 base = (P.ModelSetting.get('base_url') or '').strip() or None
                 cookies = (P.ModelSetting.get('cookies') or '').strip() or None
+                fs_url = (P.ModelSetting.get('flaresolverr_url') or '').strip() or None
                 try:
                     cli = NewtokiClient(base_url=base, logger=P.logger,
-                                        proxy_url=proxy_url, cookies=cookies)
+                                        proxy_url=proxy_url, cookies=cookies,
+                                        flaresolverr_url=fs_url)
                     h = cli.check_health()
                     if h['domain_ok'] and h.get('cookies_ok') is not False:
                         ret = {'ret': 'success',

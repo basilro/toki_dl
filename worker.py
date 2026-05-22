@@ -328,6 +328,8 @@ class Worker:
         self.proxy_url = NewtokiClient.resolve_proxy(
             self.cfg.get('use_proxy'), self.cfg.get('proxy_url'))
         self.cookies = (self.cfg.get('cookies') or '').strip() or None
+        self.flaresolverr_url = (
+            self.cfg.get('flaresolverr_url') or '').strip() or None
         self.auto_resolve = (
             (self.cfg.get('auto_resolve_base_url') or 'False') == 'True')
         self.announcer_url = (
@@ -367,7 +369,8 @@ class Worker:
             self.client = NewtokiClient(base_url=self.base_url,
                                         logger=P.logger,
                                         proxy_url=self.proxy_url,
-                                        cookies=self.cookies)
+                                        cookies=self.cookies,
+                                        flaresolverr_url=self.flaresolverr_url)
         except Exception as e:
             _auto_set(status='error', finished_at=datetime.now().isoformat(),
                       message=f'클라이언트 초기화 실패: {e}')
@@ -385,7 +388,9 @@ class Worker:
                     new_url = NewtokiClient.resolve_base_url(
                         current_base_url=old_url,
                         proxy_url=self.proxy_url,
-                        cookies=self.cookies, logger=P.logger)
+                        cookies=self.cookies,
+                        flaresolverr_url=self.flaresolverr_url,
+                        logger=P.logger)
                 except Exception as e:
                     P.logger.warning('도메인 자동 갱신 예외: %s', e)
             if new_url:
@@ -395,7 +400,8 @@ class Worker:
                 self.client = NewtokiClient(base_url=new_url,
                                             logger=P.logger,
                                             proxy_url=self.proxy_url,
-                                            cookies=self.cookies)
+                                            cookies=self.cookies,
+                                            flaresolverr_url=self.flaresolverr_url)
                 health = self.client.check_health()
                 self._send_alert(
                     f'[뉴토끼] 도메인 자동 갱신 (숫자 증가) — '
@@ -767,7 +773,8 @@ class Worker:
             self.client = NewtokiClient(base_url=self.base_url,
                                         logger=P.logger,
                                         proxy_url=self.proxy_url,
-                                        cookies=self.cookies)
+                                        cookies=self.cookies,
+                                        flaresolverr_url=self.flaresolverr_url)
         except Exception as e:
             _auto_set(status='error', finished_at=datetime.now().isoformat(),
                       message=f'클라이언트 초기화 실패: {e}')
